@@ -32,6 +32,14 @@ follow [Semantic Versioning](https://semver.org/).
 - UI: "会话请求头名（可选）" field in the LLM configuration form plus a
   `session: <name>` badge on configured rows.
 
+### Changed
+
+- Findings dashboard: severity is now unmistakable at a glance — `critical` and
+  `high` badges are solid red / solid orange with white text, `medium` keeps a pale
+  amber badge, `low` is sky and `info` is slate. Severity statistics cards carry a
+  matching colored top accent, and every table row gets a severity-colored left
+  stripe, so high-risk findings no longer blur into medium ones in a long list.
+
 ## [0.3.0] - 2026-10-28
 
 Initial public release of Cairn-PTS. Package version (`cairn/pyproject.toml`) is

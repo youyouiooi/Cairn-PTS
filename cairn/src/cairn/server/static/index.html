@@ -767,8 +767,8 @@
           <div class="grid grid-cols-3 gap-1.5">
             <template x-for="sev in findingSeverities" :key="'finding-stat-' + sev">
               <button type="button" @click="toggleFindingSeverity(sev)"
-                class="rounded-xl border bg-white px-2 py-2 text-left transition hover:border-slate-300"
-                :class="findingFilter.severity.includes(sev) ? 'border-brand-300 ring-1 ring-brand-200' : 'border-slate-200'"
+                class="rounded-xl border px-2 py-2 text-left transition hover:border-slate-300"
+                :class="findingFilter.severity.includes(sev) ? 'border-brand-300 bg-white ring-1 ring-brand-200' : findingStatCardClass(sev)"
                 :title="`筛选 ${findingSeverityLabel(sev)}（${findingStat(sev)}）`">
                 <div class="flex items-baseline justify-between gap-1">
                   <span class="text-lg font-semibold tabular-nums leading-none" :class="findingSeverityTextClass(sev)" x-text="findingStat(sev)"></span>
@@ -865,7 +865,7 @@
               <template x-for="f in findingsFiltered()" :key="f.id">
                 <tbody class="border-b border-slate-100 last:border-b-0">
                   <tr class="cursor-pointer transition-colors hover:bg-slate-50/80"
-                    :class="findingExpandedId === f.id ? 'bg-brand-50/40' : ''"
+                    :class="[findingRowAccent(f.severity), findingExpandedId === f.id ? 'bg-brand-50/40' : '']"
                     @click="toggleFindingExpanded(f.id)">
                     <td class="px-2 py-1.5 align-top">
                       <span class="inline-flex items-center px-1.5 py-0.5 rounded-md border text-[10px] font-medium whitespace-nowrap" :class="findingSeverityClass(f.severity)" x-text="findingSeverityLabel(f.severity)"></span>
@@ -2477,10 +2477,10 @@ function cairnApp() {
 
     findingSeverityClass(severity) {
       const classes = {
-        critical: 'bg-red-50 text-red-700 border-red-200',
-        high: 'bg-orange-50 text-orange-600 border-orange-200',
-        medium: 'bg-amber-50 text-amber-600 border-amber-200',
-        low: 'bg-sky-50 text-sky-600 border-sky-200',
+        critical: 'bg-red-600 text-white border-red-600 shadow-sm',
+        high: 'bg-orange-600 text-white border-orange-600 shadow-sm',
+        medium: 'bg-amber-100 text-amber-800 border-amber-300',
+        low: 'bg-sky-100 text-sky-700 border-sky-300',
         info: 'bg-slate-100 text-slate-500 border-slate-200'
       };
       return classes[severity] || classes.info;
@@ -2488,10 +2488,10 @@ function cairnApp() {
 
     findingSeverityTextClass(severity) {
       const classes = {
-        critical: 'text-red-700',
+        critical: 'text-red-600',
         high: 'text-orange-600',
-        medium: 'text-amber-500',
-        low: 'text-sky-600',
+        medium: 'text-amber-700',
+        low: 'text-sky-700',
         info: 'text-slate-500'
       };
       return classes[severity] || classes.info;
@@ -2500,10 +2500,32 @@ function cairnApp() {
     findingSeverityDotClass(severity) {
       const classes = {
         critical: 'bg-red-600',
-        high: 'bg-orange-500',
-        medium: 'bg-amber-400',
+        high: 'bg-orange-600',
+        medium: 'bg-yellow-400',
         low: 'bg-sky-500',
         info: 'bg-slate-400'
+      };
+      return classes[severity] || classes.info;
+    },
+
+    findingStatCardClass(severity) {
+      const classes = {
+        critical: 'border-t-2 border-t-red-500 bg-red-50/60',
+        high: 'border-t-2 border-t-orange-500 bg-orange-50/60',
+        medium: 'border-t-2 border-t-amber-400 bg-amber-50/70',
+        low: 'border-t-2 border-t-sky-400 bg-sky-50/60',
+        info: 'border-t-2 border-t-slate-300 bg-slate-50/70'
+      };
+      return classes[severity] || classes.info;
+    },
+
+    findingRowAccent(severity) {
+      const classes = {
+        critical: 'border-l-4 border-l-red-600',
+        high: 'border-l-4 border-l-orange-500',
+        medium: 'border-l-4 border-l-amber-400',
+        low: 'border-l-4 border-l-sky-400',
+        info: 'border-l-4 border-l-slate-200'
       };
       return classes[severity] || classes.info;
     },
