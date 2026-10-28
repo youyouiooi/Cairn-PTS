@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,6 +49,22 @@ def _probe_body(**overrides) -> dict:
         "model": "deepseek-chat",
         "headers": {},
         "api_key": API_KEY,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _update_body(**overrides) -> dict:
+    """Full-replacement PUT body; api_key None keeps the stored key."""
+    payload = {
+        "name": "default",
+        "enabled": True,
+        "protocol": "anthropic",
+        "base_url": BASE_URL,
+        "model": "deepseek-chat",
+        "small_fast_model": "",
+        "headers": {},
+        "api_key": None,
     }
     payload.update(overrides)
     return payload
@@ -716,6 +733,234 @@ class LlmConfigApiTests(unittest.TestCase):
             post.call_args.kwargs["headers"]["Authorization"],
             "Bearer sk-explicit-000000",
         )
+
+
+    # 10. per-session header name -------------------------------------------
+
+    def test_session_header_roundtrips_through_list_and_runtime(self) -> None:
+        created = self._create_ok(session_header="x-opencode-session")
+        self.assertEqual(created["session_header"], "x-opencode-session")
+
+        listed = self._list()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["session_header"], "x-opencode-session")
+        self.assertNotIn("api_key", listed[0])
+
+        runtime = self._runtime()
+        self.assertEqual(runtime.status_code, 200, runtime.text)
+        payload = runtime.json()["configs"][0]
+        self.assertEqual(payload["session_header"], "x-opencode-session")
+        self.assertEqual(payload["api_key"], API_KEY)
+
+        # The model strips surrounding whitespace.
+        stripped = self._create_ok(name="padded", session_header="  x-session-id  ")
+        self.assertEqual(stripped["session_header"], "x-session-id")
+
+    def test_session_header_empty_is_allowed(self) -> None:
+        created = self._create_ok(session_header="")
+        self.assertEqual(created["session_header"], "")
+        self.assertEqual(self._list()[0]["session_header"], "")
+        self.assertEqual(
+            self._runtime().json()["configs"][0]["session_header"], ""
+        )
+
+        blank = self._create_ok(name="blank", session_header="   ")
+        self.assertEqual(blank["session_header"], "")
+
+    def test_session_header_validation_errors(self) -> None:
+        cases = {
+            "space": "not a header",
+            "reserved": "Authorization",
+            "too long": "x" * 65,
+        }
+        for label, value in cases.items():
+            with self.subTest(label=label):
+                response = self._create(session_header=value)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("session_header", response.text)
+
+        same_as_static = self._create(
+            session_header="x-tenant", headers={"X-Tenant": "acme"}
+        )
+        self.assertEqual(same_as_static.status_code, 422, same_as_static.text)
+        self.assertIn("session_header", same_as_static.text)
+        self.assertEqual(self._list(), [])
+
+        created = self._create_ok()
+        updated = self._put(
+            f"/llm-configs/{created['id']}",
+            _update_body(session_header="Not A Header"),
+        )
+        self.assertEqual(updated.status_code, 422, updated.text)
+        self.assertEqual(self._list()[0]["session_header"], "")
+
+    def test_update_toggles_session_header(self) -> None:
+        created = self._create_ok(session_header="x-opencode-session")
+        config_id = created["id"]
+
+        cleared = self._put(
+            f"/llm-configs/{config_id}", _update_body(session_header="")
+        )
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(cleared.json()["session_header"], "")
+        self.assertEqual(self._list()[0]["session_header"], "")
+        self.assertEqual(
+            self._runtime().json()["configs"][0]["session_header"], ""
+        )
+        # The PUT omitted api_key, so the stored key must be preserved.
+        self.assertEqual(
+            self._runtime().json()["configs"][0]["api_key"], API_KEY
+        )
+
+        enabled = self._put(
+            f"/llm-configs/{config_id}",
+            _update_body(session_header="x-session-id"),
+        )
+        self.assertEqual(enabled.status_code, 200, enabled.text)
+        self.assertEqual(enabled.json()["session_header"], "x-session-id")
+        self.assertEqual(self._list()[0]["session_header"], "x-session-id")
+
+        # PUT is a full replace: leaving the field out clears it again.
+        replaced = self._put(f"/llm-configs/{config_id}", _update_body())
+        self.assertEqual(replaced.status_code, 200, replaced.text)
+        self.assertEqual(replaced.json()["session_header"], "")
+
+    def test_probe_injects_session_header_for_every_protocol(self) -> None:
+        cases = [
+            ("anthropic", "https://api.example.com/anthropic", "claude-3"),
+            ("openai_responses", "https://api.example.com/v1", "gpt-5"),
+            ("openai_chat", "https://api.example.com/v1", "gpt-4o"),
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini-pro",
+            ),
+        ]
+        for protocol, base_url, model in cases:
+            with self.subTest(protocol=protocol):
+                with patch(
+                    "cairn.server.routers.llm_config.requests.post",
+                    return_value=_FakeResponse(200),
+                ) as post:
+                    response = self._probe(
+                        _probe_body(
+                            protocol=protocol,
+                            base_url=base_url,
+                            model=model,
+                            headers={"X-Other": "kept"},
+                            session_header="x-opencode-session",
+                        )
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["ok"])
+                headers = post.call_args.kwargs["headers"]
+                self.assertEqual(
+                    headers["x-opencode-session"], "cairn-config-test"
+                )
+                self.assertEqual(headers["X-Other"], "kept")
+                self.assertEqual(
+                    [
+                        key
+                        for key in headers
+                        if key.lower() == "x-opencode-session"
+                    ],
+                    ["x-opencode-session"],
+                )
+
+        # Empty session_header keeps the old behaviour: no dynamic header.
+        with patch(
+            "cairn.server.routers.llm_config.requests.post",
+            return_value=_FakeResponse(200),
+        ) as post:
+            response = self._probe(_probe_body(session_header=""))
+        self.assertTrue(response.json()["ok"])
+        headers = post.call_args.kwargs["headers"]
+        self.assertEqual(
+            [key for key in headers if "session" in key.lower()], []
+        )
+
+    def test_probe_drops_same_named_static_header(self) -> None:
+        # Defensive path for legacy rows that still carry the header statically.
+        from cairn.server.routers import llm_config
+
+        _url, _body, headers = llm_config._probe(
+            "anthropic",
+            BASE_URL,
+            "deepseek-chat",
+            {"X-Opencode-Session": "stale-static-value"},
+            API_KEY,
+            "x-opencode-session",
+        )
+        self.assertEqual(headers["x-opencode-session"], "cairn-config-test")
+        self.assertEqual(
+            [key for key in headers if key.lower() == "x-opencode-session"],
+            ["x-opencode-session"],
+        )
+
+
+class SessionHeaderMigrationTests(unittest.TestCase):
+    """Old databases without the session_header column are upgraded in place."""
+
+    def tearDown(self) -> None:
+        from cairn.server import db
+
+        db.reset()
+
+    def test_legacy_database_gains_session_header_column(self) -> None:
+        from cairn.server import db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.db"
+            conn = sqlite3.connect(str(path))
+            conn.executescript(
+                """
+                CREATE TABLE llm_configs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    protocol TEXT NOT NULL DEFAULT 'anthropic',
+                    base_url TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    small_fast_model TEXT NOT NULL DEFAULT '',
+                    api_key TEXT NOT NULL DEFAULT '',
+                    headers TEXT NOT NULL DEFAULT '{}',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE UNIQUE INDEX llm_configs_name_uniq
+                    ON llm_configs(name);
+                INSERT INTO llm_configs (name, base_url, model, api_key)
+                VALUES ('legacy', 'https://legacy.example.com', 'm', 'sk-legacy');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            db.reset()
+            db.configure(path)
+            with db.get_conn() as conn:
+                columns = [
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(llm_configs)")
+                ]
+                self.assertIn("session_header", columns)
+                row = conn.execute(
+                    "SELECT * FROM llm_configs WHERE name = 'legacy'"
+                ).fetchone()
+            self.assertEqual(row["session_header"], "")
+            self.assertEqual(row["api_key"], "sk-legacy")
+            self.assertEqual(row["base_url"], "https://legacy.example.com")
+
+            # A second configure must not add the column twice.
+            db.reset()
+            db.configure(path)
+            with db.get_conn() as conn:
+                names = [
+                    item["name"]
+                    for item in conn.execute("PRAGMA table_info(llm_configs)")
+                ]
+            self.assertEqual(names.count("session_header"), 1)
+            self.assertEqual(len(names), 12)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,27 @@ that baseline.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Per-session request headers for LLM gateways.** Each LLM configuration can now
+  specify a *session header name* (`session_header`, for example
+  `x-opencode-session`) in addition to fixed custom headers. The dispatcher fills
+  the value on every request with the current session id — the agent session UUID
+  for `claudecode`, a per-process id for `codex`/`pi`, and a
+  `healthcheck-<worker>` id for health checks — so gateways that cache or route by
+  session id work correctly. Same session stays stable across its turns, different
+  sessions get different values; values are never written to the database, logs or
+  browser responses. Configurations with an empty `session_header` behave exactly
+  as before.
+- Server: `session_header` field on create/update/test/list/runtime payloads,
+  validation (RFC 7230 token, ≤64 chars, reserved header names rejected, must not
+  duplicate a static header name), probe injection with a fixed test value, and a
+  startup `ALTER TABLE` migration for existing databases.
+- UI: "会话请求头名（可选）" field in the LLM configuration form plus a
+  `session: <name>` badge on configured rows.
+
 ## [0.3.0] - 2026-10-28
 
 Initial public release of Cairn-PTS. Package version (`cairn/pyproject.toml`) is

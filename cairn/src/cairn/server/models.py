@@ -257,8 +257,24 @@ MAX_LLM_NAME_LENGTH = 64
 MAX_LLM_HEADERS = 20
 MAX_LLM_HEADER_VALUE_LENGTH = 1024
 MAX_LLM_HEADERS_TOTAL_LENGTH = 8192
+MAX_LLM_SESSION_HEADER_LENGTH = 64
 
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+# Header names the LLM config may not repurpose as the per-session header:
+# these carry credentials, protocol metadata, or transport semantics.
+_RESERVED_SESSION_HEADERS = frozenset(
+    {
+        "authorization",
+        "content-length",
+        "content-type",
+        "host",
+        "transfer-encoding",
+        "x-api-key",
+        "x-goog-api-key",
+        "anthropic-version",
+    }
+)
 
 
 def normalize_llm_name(value: str) -> str:
@@ -302,6 +318,25 @@ def normalize_llm_headers(value: dict[str, str] | None) -> dict[str, str]:
     if total > MAX_LLM_HEADERS_TOTAL_LENGTH:
         raise ValueError(f"headers are too large in total (max {MAX_LLM_HEADERS_TOTAL_LENGTH} bytes)")
     return normalized
+
+
+def normalize_llm_session_header(value: str | None) -> str:
+    """Validate the name of the per-session header.
+
+    The configured header is sent with every request, but its value is filled
+    in by the dispatcher with the current session id (never stored here). An
+    empty value disables the header.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if len(text) > MAX_LLM_SESSION_HEADER_LENGTH:
+        raise ValueError(f"session_header is too long (max {MAX_LLM_SESSION_HEADER_LENGTH})")
+    if not _HEADER_NAME_RE.match(text):
+        raise ValueError(f"invalid session_header name: {text!r}")
+    if text.lower() in _RESERVED_SESSION_HEADERS:
+        raise ValueError(f"session_header {text!r} is reserved")
+    return text
 
 
 def _validate_llm_model_name(value: str | None) -> str | None:
@@ -357,6 +392,7 @@ class LlmConfigEntry(BaseModel):
     model: str = ""
     small_fast_model: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    session_header: str = ""
     priority: int = 0
     updated_at: str = ""
 
@@ -392,6 +428,7 @@ class LlmConfigCreate(BaseModel):
     model: str = ""
     small_fast_model: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    session_header: str = ""
     api_key: str = ""
 
     @field_validator("name")
@@ -419,6 +456,19 @@ class LlmConfigCreate(BaseModel):
     def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return normalize_llm_headers(value)
 
+    @field_validator("session_header")
+    @classmethod
+    def validate_session_header(cls, value: str) -> str:
+        return normalize_llm_session_header(value)
+
+    @model_validator(mode="after")
+    def validate_session_header_not_static(self) -> "LlmConfigCreate":
+        if self.session_header and any(
+            name.lower() == self.session_header.lower() for name in self.headers
+        ):
+            raise ValueError("session_header must not also be listed in headers")
+        return self
+
     @model_validator(mode="after")
     def validate_enabled_fields(self) -> "LlmConfigCreate":
         if self.enabled:
@@ -441,6 +491,7 @@ class LlmConfigUpdate(BaseModel):
     model: str = ""
     small_fast_model: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    session_header: str = ""
     # None = keep the stored key, "" = clear it, any other value = replace it.
     api_key: str | None = None
 
@@ -468,6 +519,19 @@ class LlmConfigUpdate(BaseModel):
     @classmethod
     def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return normalize_llm_headers(value)
+
+    @field_validator("session_header")
+    @classmethod
+    def validate_session_header(cls, value: str) -> str:
+        return normalize_llm_session_header(value)
+
+    @model_validator(mode="after")
+    def validate_session_header_not_static(self) -> "LlmConfigUpdate":
+        if self.session_header and any(
+            name.lower() == self.session_header.lower() for name in self.headers
+        ):
+            raise ValueError("session_header must not also be listed in headers")
+        return self
 
     @model_validator(mode="after")
     def validate_enabled_fields(self) -> "LlmConfigUpdate":
@@ -501,6 +565,7 @@ class LlmConfigTestRequest(BaseModel):
     model: str
     small_fast_model: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
+    session_header: str = ""
     api_key: str | None = None
     timeout_seconds: int = Field(default=10, ge=1, le=30)
 
@@ -523,6 +588,19 @@ class LlmConfigTestRequest(BaseModel):
     @classmethod
     def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
         return normalize_llm_headers(value)
+
+    @field_validator("session_header")
+    @classmethod
+    def validate_session_header(cls, value: str) -> str:
+        return normalize_llm_session_header(value)
+
+    @model_validator(mode="after")
+    def validate_session_header_not_static(self) -> "LlmConfigTestRequest":
+        if self.session_header and any(
+            name.lower() == self.session_header.lower() for name in self.headers
+        ):
+            raise ValueError("session_header must not also be listed in headers")
+        return self
 
     @model_validator(mode="after")
     def validate_required_fields(self) -> "LlmConfigTestRequest":

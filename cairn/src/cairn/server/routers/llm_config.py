@@ -41,6 +41,9 @@ CONNECT_TIMEOUT_SECONDS = 3.05
 MAX_PREVIEW_BYTES = 4096
 MAX_PREVIEW_CHARS = 512
 MAX_ERROR_CHARS = 300
+# Probe value for the configured per-session header: the real value is the
+# current session id, filled in by the dispatcher at request time.
+TEST_SESSION_VALUE = "cairn-config-test"
 
 
 # --- auth channels ------------------------------------------------------------
@@ -109,6 +112,7 @@ def _view(row: sqlite3.Row) -> LlmConfigView:
         model=row["model"],
         small_fast_model=row["small_fast_model"],
         headers=_row_headers(row),
+        session_header=row["session_header"] or "",
         priority=row["priority"],
         updated_at=row["updated_at"],
         has_api_key=bool(key),
@@ -127,6 +131,7 @@ def _payload(row: sqlite3.Row) -> LlmConfigPayload:
         model=row["model"],
         small_fast_model=row["small_fast_model"],
         headers=_row_headers(row),
+        session_header=row["session_header"] or "",
         priority=row["priority"],
         updated_at=row["updated_at"],
         api_key=row["api_key"] or "",
@@ -157,12 +162,31 @@ def _merge_headers(base: dict[str, str], custom: dict[str, str] | None) -> dict[
     return merged
 
 
+def _inject_session_header(
+    headers: dict[str, str], session_header: str
+) -> dict[str, str]:
+    """Attach the per-session header with a probe value (case-insensitive override).
+
+    The configured name is never a static header, but legacy rows may still carry
+    a same-named static header: drop those before injecting so the probe value wins.
+    """
+    name = (session_header or "").strip()
+    if not name:
+        return headers
+    lowered = name.lower()
+    for existing in [key for key in headers if key.lower() == lowered]:
+        del headers[existing]
+    headers[name] = TEST_SESSION_VALUE
+    return headers
+
+
 def _probe(
     protocol: LlmProtocol,
     base_url: str,
     model: str,
     headers: dict[str, str] | None,
     api_key: str,
+    session_header: str = "",
 ) -> tuple[str, dict, dict[str, str]]:
     """Return (url, json_body, request_headers) for one protocol."""
     base_headers = {"content-type": "application/json"}
@@ -202,7 +226,8 @@ def _probe(
         base_headers["x-goog-api-key"] = api_key
     else:  # pragma: no cover - Pydantic already restricts the protocol
         raise HTTPException(400, "Unsupported protocol")
-    return url, body, _merge_headers(base_headers, headers)
+    request_headers = _merge_headers(base_headers, headers)
+    return url, body, _inject_session_header(request_headers, session_header)
 
 
 def _redact(text: str, key: str) -> str:
@@ -231,8 +256,11 @@ def _execute_probe(
     headers: dict[str, str] | None,
     api_key: str,
     timeout_seconds: int,
+    session_header: str = "",
 ) -> LlmConfigTestResponse:
-    url, body, request_headers = _probe(protocol, base_url, model, headers, api_key)
+    url, body, request_headers = _probe(
+        protocol, base_url, model, headers, api_key, session_header
+    )
     started = time.perf_counter()
     try:
         response = requests.post(
@@ -327,8 +355,8 @@ def create_llm_config(body: LlmConfigCreate):
                 """
                 INSERT INTO llm_configs
                     (name, enabled, protocol, base_url, model, small_fast_model,
-                     api_key, headers, priority, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     api_key, headers, session_header, priority, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     body.name,
@@ -339,6 +367,7 @@ def create_llm_config(body: LlmConfigCreate):
                     body.small_fast_model,
                     body.api_key,
                     json.dumps(body.headers, ensure_ascii=False),
+                    body.session_header,
                     priority,
                     now,
                 ),
@@ -380,7 +409,8 @@ def update_llm_config(config_id: int, body: LlmConfigUpdate):
                 """
                 UPDATE llm_configs
                 SET name = ?, enabled = ?, protocol = ?, base_url = ?, model = ?,
-                    small_fast_model = ?, api_key = ?, headers = ?, updated_at = ?
+                    small_fast_model = ?, api_key = ?, headers = ?, session_header = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -392,6 +422,7 @@ def update_llm_config(config_id: int, body: LlmConfigUpdate):
                     body.small_fast_model,
                     new_key,
                     json.dumps(body.headers, ensure_ascii=False),
+                    body.session_header,
                     now,
                     config_id,
                 ),
@@ -474,4 +505,5 @@ def test_llm_config(body: LlmConfigTestRequest):
         body.headers,
         api_key,
         body.timeout_seconds,
+        body.session_header,
     )

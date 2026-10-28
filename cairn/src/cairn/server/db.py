@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS llm_configs (
     small_fast_model TEXT NOT NULL DEFAULT '',
     api_key TEXT NOT NULL DEFAULT '',
     headers TEXT NOT NULL DEFAULT '{}',
+    session_header TEXT NOT NULL DEFAULT '',
     priority INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT ''
 );
@@ -170,6 +171,20 @@ CREATE TABLE IF NOT EXISTS auth_meta (
 """
 
 
+def _migrate_llm_config_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the first llm_configs schema.
+
+    ``CREATE TABLE IF NOT EXISTS`` does not alter an existing table, so every
+    additive column must be backfilled here (the project has no migration
+    framework).
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(llm_configs)")}
+    if "session_header" not in columns:
+        conn.execute(
+            "ALTER TABLE llm_configs ADD COLUMN session_header TEXT NOT NULL DEFAULT ''"
+        )
+
+
 def _migrate_legacy_llm_config(conn: sqlite3.Connection) -> None:
     """Copy the legacy single-row llm_config into llm_configs once.
 
@@ -210,6 +225,7 @@ def configure(path: Path) -> None:
     _db_path.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate_llm_config_columns(conn)
         _migrate_legacy_llm_config(conn)
     try:
         os.chmod(_db_path, 0o600)

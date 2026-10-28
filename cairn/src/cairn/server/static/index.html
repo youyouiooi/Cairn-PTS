@@ -1384,6 +1384,8 @@
                   <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold tracking-wide border"
                     :class="protocolBadgeClass(cfg.protocol)" x-text="protocolLabel(cfg.protocol)"></span>
                   <span x-show="!cfg.enabled" class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-slate-200 text-slate-500">已停用</span>
+                  <span x-show="cfg.session_header" class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold tracking-wide border bg-indigo-50 text-indigo-600 border-indigo-200"
+                    :title="'每次请求自动带上 ' + cfg.session_header + '，值为当前会话 id'" x-text="'session: ' + cfg.session_header"></span>
                 </div>
                 <p class="mt-1.5 text-[11px] text-slate-500 truncate"><span class="text-slate-400">模型：</span><span class="font-mono" x-text="cfg.model || '未填写'"></span></p>
                 <p class="text-[11px] text-slate-500 truncate"><span class="text-slate-400">Base URL：</span><span class="font-mono" x-text="cfg.base_url || '未填写'"></span></p>
@@ -1477,6 +1479,12 @@
               启用（停用的配置不参与 dispatcher 轮询）
             </label>
           </div>
+          <label class="block">
+            <span class="text-[11px] text-slate-400 mb-1 block font-medium">会话请求头名（可选）</span>
+            <input x-model="llmForm.session_header" maxlength="64" placeholder="x-opencode-session"
+              class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300">
+            <span class="text-[11px] text-slate-400 mt-1 block leading-relaxed">只填头名、不要填值：值由 dispatcher 自动填成当前会话 id（同一任务多轮稳定、不同任务不同），用于网关提示缓存 / 粘性路由。</span>
+          </label>
           <div>
             <div class="flex items-center justify-between gap-2 mb-1.5">
               <span class="text-[11px] text-slate-400 font-medium leading-relaxed">自定义请求头（可选；同名时覆盖内置头，值只在服务端保存）</span>
@@ -1697,6 +1705,7 @@ function cairnApp() {
       model: '',
       small_fast_model: '',
       api_key: '',
+      session_header: '',
       headers: [{ name: '', value: '' }],
     },
     llmTestResult: { testing: false, ok: null, status_code: null, latency_ms: 0, error: '', response_preview: '', message: '' },
@@ -4664,6 +4673,7 @@ function cairnApp() {
         model: '',
         small_fast_model: '',
         api_key: '',
+        session_header: '',
         headers: [{ name: '', value: '' }],
       };
     },
@@ -4694,6 +4704,7 @@ function cairnApp() {
         model: cfg.model || '',
         small_fast_model: cfg.small_fast_model || '',
         api_key: '',
+        session_header: cfg.session_header || '',
         headers: headers.length ? headers : [{ name: '', value: '' }],
       };
       this.llmFormError = '';
@@ -4719,6 +4730,7 @@ function cairnApp() {
         model: cfg.model || '',
         small_fast_model: cfg.small_fast_model || '',
         api_key: '',
+        session_header: cfg.session_header || '',
         headers: headers.length ? headers : [{ name: '', value: '' }],
       };
       this.llmFormError = '';
@@ -4775,6 +4787,23 @@ function cairnApp() {
       return result;
     },
 
+    // 会话请求头名（session_header）校验，与后端 models.normalize_llm_session_header 对齐：
+    // 空允许；RFC 7230 token；≤64；保留头名拒绝；不得与自定义请求头任一同名（大小写不敏感）。
+    // 返回值交给请求体；注意这里的值只是「头名」，头值由 dispatcher 填当前会话 id。
+    validateLlmSessionHeader(rawValue, headers) {
+      const value = String(rawValue || '').trim();
+      if (!value) return '';
+      if (value.length > 64) throw new Error('会话请求头名最长 64 个字符');
+      const tokenRe = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+      if (!tokenRe.test(value)) throw new Error(`会话请求头名「${value}」含非法字符（只允许字母、数字和 -_. 等 token 字符）`);
+      const lowered = value.toLowerCase();
+      const reserved = ['authorization', 'content-length', 'content-type', 'host', 'transfer-encoding', 'x-api-key', 'x-goog-api-key', 'anthropic-version'];
+      if (reserved.includes(lowered)) throw new Error(`「${value}」是保留头名（凭据或协议元数据），不能作为会话请求头`);
+      const conflict = Object.keys(headers || {}).find((key) => key.toLowerCase() === lowered);
+      if (conflict) throw new Error(`会话请求头名与自定义请求头「${conflict}」同名，请保留其中一个`);
+      return value;
+    },
+
     llmTargetChanged() {
       const original = this.llmEditingOriginal || {};
       const baseUrl = (this.llmForm.base_url || '').trim().replace(/\/+$/, '');
@@ -4791,6 +4820,7 @@ function cairnApp() {
       const smallFastModel = (this.llmForm.small_fast_model || '').trim();
       const apiKey = (this.llmForm.api_key || '').trim();
       const headers = this.normalizeLlmHeaders();
+      const sessionHeader = this.validateLlmSessionHeader(this.llmForm.session_header, headers);
       if (!name) throw new Error('请填写配置名称');
       if (name.length > 64) throw new Error('配置名称最长 64 个字符');
       if (!baseUrl) throw new Error('请填写 Base URL');
@@ -4803,7 +4833,7 @@ function cairnApp() {
       if (enabled && !apiKey && !(editing && editing.has_api_key)) {
         throw new Error('启用配置必须填写 API Key');
       }
-      return { name, enabled, protocol, baseUrl, model, smallFastModel, apiKey, headers };
+      return { name, enabled, protocol, baseUrl, model, smallFastModel, apiKey, headers, sessionHeader };
     },
 
     async saveLlmConfig() {
@@ -4824,6 +4854,7 @@ function cairnApp() {
         model: data.model,
         small_fast_model: data.smallFastModel,
         headers: data.headers,
+        session_header: data.sessionHeader,
         // 编辑时留空传 null = 保留已存 Key；新增时必填。
         api_key: editingId ? (data.apiKey || null) : data.apiKey,
       };
@@ -4849,12 +4880,13 @@ function cairnApp() {
       if (!/^https?:\/\//i.test(baseUrl)) throw new Error('Base URL 必须以 http:// 或 https:// 开头');
       if (!model) throw new Error('请填写模型名称');
       const headers = this.normalizeLlmHeaders();
+      const sessionHeader = this.validateLlmSessionHeader(this.llmForm.session_header, headers);
       const editing = this.llmEditingId ? this.llmConfigs.find((item) => item.id === this.llmEditingId) : null;
       if (!apiKey) {
         if (!editing || !editing.has_api_key) throw new Error('测试前请先填写 API Key');
         if (this.llmTargetChanged()) throw new Error('修改 Base URL 或协议后需要重新填写 API Key 才能测试');
       }
-      return { baseUrl, model, headers };
+      return { baseUrl, model, headers, sessionHeader };
     },
 
     async testLlmForm() {
@@ -4876,6 +4908,7 @@ function cairnApp() {
           model: cond.model,
           small_fast_model: (this.llmForm.small_fast_model || '').trim(),
           headers: cond.headers,
+          session_header: cond.sessionHeader,
           api_key: apiKey || null,
           timeout_seconds: 15,
         });
@@ -4909,6 +4942,7 @@ function cairnApp() {
           model: cfg.model || '',
           small_fast_model: cfg.small_fast_model || '',
           headers: cfg.headers || {},
+          session_header: cfg.session_header || '',
           // 传 null 让后端复用已保存的 Key（仅当 base_url/protocol 未变时允许）。
           api_key: null,
           timeout_seconds: 15,
@@ -4939,6 +4973,7 @@ function cairnApp() {
           model: cfg.model || '',
           small_fast_model: cfg.small_fast_model || '',
           headers: cfg.headers || {},
+          session_header: cfg.session_header || '',
           api_key: null,
         });
         this.llmConfigs = this.llmConfigs.map((item) => (item.id === cfg.id ? updated : item));

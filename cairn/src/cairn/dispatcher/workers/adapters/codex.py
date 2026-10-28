@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.adapters._curl import (
@@ -9,6 +10,8 @@ from cairn.dispatcher.workers.adapters._curl import (
     filter_custom_headers,
     parse_custom_headers,
     render_curl_command,
+    session_header_name,
+    with_session_header,
 )
 from cairn.dispatcher.workers.base import DriverResult, RegexSessionDriver
 
@@ -35,13 +38,16 @@ case "$http_status" in 2??) exit 0 ;; *) exit 1 ;; esac
 """.strip()
 
 
-def _custom_headers(worker: WorkerConfig) -> tuple[dict[str, str], bool]:
+def _request_headers(worker: WorkerConfig, session_value: str) -> tuple[dict[str, str], bool]:
+    """Static custom headers plus the dynamic session header for one command."""
     headers, invalid = parse_custom_headers(worker.env)
-    return filter_custom_headers(headers, _BUILTIN_HEADER_NAMES), invalid
+    headers = filter_custom_headers(headers, _BUILTIN_HEADER_NAMES)
+    headers = with_session_header(headers, session_header_name(worker), session_value)
+    return headers, invalid
 
 
 def _healthcheck_script(worker: WorkerConfig) -> str:
-    headers, _ = _custom_headers(worker)
+    headers, _ = _request_headers(worker, f"healthcheck-{worker.name}")
     return _HEALTHCHECK_SCRIPT.replace("__EXTRA_HEADERS__", curl_header_fragment(headers))
 
 
@@ -50,6 +56,11 @@ def _http_headers_config_argument(headers: dict[str, str]) -> str:
         f"{json.dumps(name)} = {json.dumps(value)}" for name, value in headers.items()
     )
     return f"model_providers.cairn.http_headers={{ {entries} }}"
+
+
+def _random_session_value(worker: WorkerConfig) -> str:
+    """No pre-generated codex session exists at exec time: one id per process."""
+    return f"{worker.name}-{uuid4().hex[:12]}"
 
 
 class CodexDriver(RegexSessionDriver):
@@ -62,7 +73,7 @@ class CodexDriver(RegexSessionDriver):
         return ["/bin/sh", "-lc", "CAIRN_HEALTHCHECK_VERBOSE=1; " + _healthcheck_script(worker)]
 
     def describe_startup_healthcheck(self, worker: WorkerConfig) -> str:
-        headers, invalid = _custom_headers(worker)
+        headers, invalid = _request_headers(worker, f"healthcheck-{worker.name}")
         custom_arguments: list[str] = []
         for name in headers:
             custom_arguments.extend(["-H", f"{name}: ***"])
@@ -102,7 +113,7 @@ class CodexDriver(RegexSessionDriver):
             "-c",
             'model_providers.cairn.env_key="OPENAI_API_KEY"',
         ]
-        self._append_http_headers(argv, worker)
+        self._append_http_headers(argv, worker, _random_session_value(worker))
         argv.extend(["--", prompt])
         return DriverResult(argv=argv)
 
@@ -129,14 +140,14 @@ class CodexDriver(RegexSessionDriver):
             "-c",
             'model_providers.cairn.env_key="OPENAI_API_KEY"',
         ]
-        self._append_http_headers(argv, worker)
+        self._append_http_headers(argv, worker, session)
         argv.extend(["--", prompt])
         return argv
 
     @staticmethod
-    def _append_http_headers(argv: list[str], worker: WorkerConfig) -> None:
+    def _append_http_headers(argv: list[str], worker: WorkerConfig, session_value: str) -> None:
         """Add the TOML inline table for custom headers right before ``--``."""
-        headers, _ = _custom_headers(worker)
+        headers, _ = _request_headers(worker, session_value)
         if not headers:
             return
         argv.extend(["-c", _http_headers_config_argument(headers)])

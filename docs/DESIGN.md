@@ -471,9 +471,10 @@ Agent CLI 仍然带 `--dangerously-skip-permissions`：这是工具能力，不�
 
 LLM 配置从「单条 + dispatch.yaml env」升级为服务端持久化的有序配置池：
 
-- 新表 `llm_configs`：`name / enabled / protocol / base_url / model / small_fast_model / api_key / headers(JSON) / priority / updated_at`。启动时把旧 `llm_config` 单行一次性迁移成 `name='default'`，旧表保留用于回滚（无迁移框架，迁移函数自身幂等）。
+- 新表 `llm_configs`：`name / enabled / protocol / base_url / model / small_fast_model / api_key / headers(JSON) / session_header / priority / updated_at`。启动时把旧 `llm_config` 单行一次性迁移成 `name='default'`，旧表保留用于回滚（无迁移框架，迁移函数自身幂等）。`session_header` 列由 `_migrate_llm_config_columns()` 用 `ALTER TABLE ADD COLUMN` 补齐（旧库启动即升级）。
 - 协议：`anthropic` / `openai_responses` / `openai_chat` / `gemini`。Worker 兼容性：`claudecode` 仅 `anthropic`，`codex` 仅 `openai_responses`，`pi` 全部四种，`mock` 忽略。
 - 自定义请求头在服务端探测、`claudecode`/`codex` 健康检查与 curl、codex `-c model_providers.cairn.http_headers={...}`、pi `models.json` 中都会带上；写入时按 RFC 7230 校验名称、禁止控制字符并限制长度，避免 shell/TOML 注入。
+- **会话请求头**（可选 `session_header`）：配置只存头名，dispatcher 在每个请求上用当前会话 id 填值（网关按 session 做提示缓存 / 粘性路由）：`claudecode` 用预生成 session UUID（execute/conclude 稳定），经 `env ANTHROPIC_CUSTOM_HEADERS="…"` 前缀注入；`codex` execute 每进程随机 `worker-<12hex>`、conclude 用真实 session，合并进 http_headers TOML；`pi` 经位置参数写进临时 `models.json` 的 provider `headers`；健康检查统一用 `healthcheck-<worker>`。值为运行时产物，不落库、不进日志、不回显浏览器；字段为空时命令与旧版完全一致。
 - 浏览器的 session 通道是唯一写入口；dispatcher 用 Bearer 调 `GET /llm-configs/runtime` 拿有序 + 明文 key 的池，`_refresh_llm_config` 只在指纹变化时重建 `self.config`。
 - 故障转移：每个 worker 保持当前配置（sticky）。任务健康检查失败 → 该配置记一次失败并按 30s→60s→120s→240s→300s 指数冷却，worker 轮换到下一个兼容配置（按池顺序，跳过冷却中的）；全部冷却时选最早到期者重试；成功后清该配置失败计数。启动健康检查改为逐候选重试，所有 worker 的所有候选都失败才拒绝启动。
 - UI：设置页显示配置列表（新增 / 编辑 / 删除 / 排序 / 启用 / 测试），Key 只显示掩码；`GET /llm-configs` 永不含明文 key。API 细节见 `docs/specs/llm-config.md`。

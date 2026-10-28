@@ -19,6 +19,7 @@ SQLite 表 `llm_configs`（旧单行表 `llm_config` 保留，启动时一次性
 | `model` / `small_fast_model` | 模型名，≤256 |
 | `api_key` | 明文存储（DB 文件 0600），列表接口永不返回 |
 | `headers` | 自定义请求头 JSON 对象；名称 RFC 7230 token，值禁控制字符，≤20 个 / 单值 ≤1024 / 总长 ≤8192 |
+| `session_header` | 可选：**会话请求头名**（例如 `x-opencode-session`）。配置只填头名，值由 dispatcher 每次任务自动生成为当前会话 id；≤64 字符、RFC 7230 token、不能与保留头同名、不能同时出现在 `headers` 里 |
 | `priority` | 升序决定 dispatcher 的尝试顺序；reorder 接口重排为 0,10,20… |
 | `updated_at` | UTC ISO 时间 |
 
@@ -48,7 +49,7 @@ SQLite 表 `llm_configs`（旧单行表 `llm_config` 保留，启动时一次性
 ### `POST /llm-configs`
 
 Body：`LlmConfigCreate` = `{name, enabled=true, protocol, base_url, model,
-small_fast_model, headers, api_key}`。`enabled=true` 时 `base_url` / `model` /
+small_fast_model, headers, session_header, api_key}`。`enabled=true` 时 `base_url` / `model` /
 `api_key` 必填（422）。`priority = max+10`。成功 201，返回单条 view。
 重名 409 `LLM config name already exists`；最多 50 条，超出 400
 `too many LLM configurations (max 50)`。
@@ -56,7 +57,7 @@ small_fast_model, headers, api_key}`。`enabled=true` 时 `base_url` / `model` /
 ### `PUT /llm-configs/{id}`
 
 Body：`LlmConfigUpdate` = `{name, enabled, protocol, base_url, model,
-small_fast_model, headers, api_key|null}`，是对可变字段的**整体替换**。
+small_fast_model, headers, session_header, api_key|null}`，是对可变字段的**整体替换**。
 
 - `api_key` 为 `null` = 保留已存 key；为 `""` = 清空；其它 = 替换。
 - `base_url` 或 `protocol` 改变且 `api_key=null` → 400
@@ -77,7 +78,7 @@ Body：`{"ids": [3, 1, 2]}`。必须恰好覆盖库中全部 id（否则 400
 ### `POST /llm-configs/test`
 
 草稿探测，不落库。Body：`LlmConfigTestRequest` = `{id|null, protocol, base_url,
-model, small_fast_model, headers, api_key|null, timeout_seconds=10 (1..30)}`。
+model, small_fast_model, headers, session_header, api_key|null, timeout_seconds=10 (1..30)}`。
 
 - 传 `id` 且 `api_key` 为空/`null` 时读取已存配置复用 key，但仅当
   `base_url + protocol` 与已存一致；否则（含 id 不存在）400 `API key required`。
@@ -96,15 +97,19 @@ model, small_fast_model, headers, api_key|null, timeout_seconds=10 (1..30)}`。
 请求参数：`timeout=(3.05, timeout_seconds)`、`allow_redirects=False`。
 该接口会让服务器向任意 http(s) 地址发 POST，仅 session 管理员可用。
 
+若请求带 `session_header`，探测请求会先按大小写不敏感移除静态 `headers` 中的同名键，
+再注入 `<session_header>: cairn-config-test`（固定测试值；真实值由 dispatcher 按会话生成）。
+这同时兼容历史脏数据（旧版把 session 头写进固定 headers 的情况）。
+
 ### `GET /llm-configs/runtime`
 
 仅 Bearer。返回 **仅 enabled** 的配置，按 `priority, id` 升序，含明文
-`api_key` 与解析后的 `headers`：
+`api_key`、`headers` 与 `session_header`：
 
 ```json
 {"configs": [{"id": 1, "name": "ark", "enabled": true, "protocol": "anthropic",
   "base_url": "https://…", "model": "m", "small_fast_model": "",
-  "headers": {}, "priority": 0, "updated_at": "…", "api_key": "sk-…"}]}
+  "headers": {}, "session_header": "", "priority": 0, "updated_at": "…", "api_key": "sk-…"}]}
 ```
 
 空池返回 `{"configs": []}`；dispatcher 保持 `dispatch.yaml` 的 worker env 不变。
@@ -126,6 +131,19 @@ model, small_fast_model, headers, api_key|null, timeout_seconds=10 (1..30)}`。
     `google-generative-ai`）；自定义头写进临时 `models.json` 的 provider `headers`
 - sticky + 冷却：健康检查失败 → 该配置 `cooldown = min(300, 30 * 2**(failures-1))` 秒，
   worker 切到下一个兼容配置；全部冷却时选最早到期者重试；任务成功后清失败计数。
+- **会话请求头动态注入**（`session_header` 非空时）：配置只存头名，dispatcher 在每次
+  请求时用**当前会话 id** 填充值，用于网关按 session 的提示缓存 / 粘性路由：
+  - claudecode：`execute`/`conclude` 使用预生成的 Claude session UUID（同一任务多轮稳定），
+    通过 `env ANTHROPIC_CUSTOM_HEADERS="…静态头…\n<name>: <session id>"` 前缀注入；
+    健康检查用 `healthcheck-<worker.name>`。
+  - codex：`execute` 用 `f"{worker.name}-{uuid4().hex[:12]}"`（每进程一个），`conclude`
+    复用真实 session；健康检查用 `healthcheck-<worker.name>`；合并进
+    `-c model_providers.cairn.http_headers={...}` 的 TOML inline table。
+  - pi：值作为 shell 位置参数传入 models.json 生成脚本，写进 provider `headers`
+    （脚本文本不含值）；execute 无 session 时随机，conclude 复用；健康检查用
+    `healthcheck-<worker.name>`。
+  - `session_header` 为空时所有命令与旧版完全一致（零变化）；值只存在于运行时
+    env/argv，不落库、不打印日志、不返回给浏览器。
 - 启动健康检查逐候选重试：任一 worker 的任一候选通过即可启动；所有 worker 的
   所有候选都失败才 `RuntimeError` 拒绝启动。
 - 日志：`llm config applied configs=… applied_workers=… skipped_workers=…`、
@@ -139,5 +157,6 @@ cd cairn
 uv run python -m unittest tests.test_llm_config tests.test_llm_override -v
 ```
 
-服务端测试覆盖 CRUD/排序/通道鉴权/掩码/探测（mock `requests.post`，不真发网络）；
-dispatcher 测试覆盖协议兼容矩阵、候选选择、冷却退避、env 覆盖与自定义头。
+服务端测试覆盖 CRUD/排序/通道鉴权/掩码/探测（mock `requests.post`，不真发网络）、
+`session_header` 校验与四协议探测注入、旧库 ALTER 迁移；
+dispatcher 测试覆盖协议兼容矩阵、候选选择、冷却退避、env 覆盖、自定义头与会话头动态注入。

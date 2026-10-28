@@ -27,6 +27,7 @@ from cairn.dispatcher.llm_override import (
     CONFIG_FAILURE_COOLDOWN_BASE_SECONDS,
     CONFIG_FAILURE_COOLDOWN_MAX_SECONDS,
     LLM_HTTP_HEADERS_ENV,
+    LLM_SESSION_HEADER_ENV,
     PI_API_BY_PROTOCOL,
     LlmCandidate,
     apply_pool,
@@ -176,6 +177,7 @@ def _payload(
     api_key: str | None = None,
     headers: dict[str, str] | None = None,
     enabled: bool = True,
+    session_header: str = "",
 ) -> LlmConfigPayload:
     return LlmConfigPayload(
         id=config_id,
@@ -187,6 +189,7 @@ def _payload(
         api_key=f"key-{config_id}" if api_key is None else api_key,
         headers=dict(headers or {}),
         enabled=enabled,
+        session_header=session_header,
     )
 
 
@@ -199,6 +202,7 @@ def _candidate(
     small_fast_model: str = "small-model",
     api_key: str | None = None,
     headers: dict[str, str] | None = None,
+    session_header: str = "",
 ) -> LlmCandidate:
     return LlmCandidate(
         config_id=config_id,
@@ -209,6 +213,7 @@ def _candidate(
         small_fast_model=small_fast_model,
         api_key=f"key-{config_id}" if api_key is None else api_key,
         headers=dict(headers or {}),
+        session_header=session_header,
     )
 
 
@@ -990,3 +995,246 @@ class LoopStartupHealthcheckTests(_LoopTestCase):
         self.assertEqual(calls, [["cc", "cx", "pi", "mock"]])
         self.assertTrue(self.loop._startup_healthchecks_checked)
         self.assertEqual(self.loop._worker_active_config, {})
+
+
+SESSION_HEADER = "x-opencode-session"
+
+
+class SessionHeaderPoolTests(unittest.TestCase):
+    """Contract section 3.1: the session header name travels as its own env var."""
+
+    def test_parse_pool_reads_session_header(self) -> None:
+        candidate = parse_pool([_payload(1, session_header=SESSION_HEADER)])[0]
+        self.assertEqual(candidate.session_header, SESSION_HEADER)
+
+    def test_parse_pool_defaults_session_header_to_empty(self) -> None:
+        self.assertEqual(parse_pool([_payload(1)])[0].session_header, "")
+
+    def test_fingerprint_is_sensitive_to_session_header(self) -> None:
+        base = pool_fingerprint([_candidate(1)])
+        changed = pool_fingerprint([_candidate(1, session_header=SESSION_HEADER)])
+        self.assertNotEqual(base, changed)
+
+    def test_env_overrides_emit_session_header_name_for_every_worker_type(self) -> None:
+        expectations = {
+            "claudecode": _candidate(1, session_header=SESSION_HEADER),
+            "codex": _candidate(2, protocol="openai_responses", session_header=SESSION_HEADER),
+            "pi": _candidate(3, protocol="gemini", session_header=SESSION_HEADER),
+        }
+        for worker_type, candidate in expectations.items():
+            with self.subTest(worker_type=worker_type):
+                overrides = worker_env_overrides(_worker(worker_type), candidate)
+                self.assertEqual(overrides[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+
+    def test_env_overrides_keep_session_header_out_of_static_json(self) -> None:
+        candidate = _candidate(1, headers={"X-Keep": "yes"}, session_header=SESSION_HEADER)
+        overrides = worker_env_overrides(_worker("claudecode"), candidate)
+        self.assertEqual(json.loads(overrides[LLM_HTTP_HEADERS_ENV]), {"X-Keep": "yes"})
+        self.assertNotIn(SESSION_HEADER, overrides[LLM_HTTP_HEADERS_ENV])
+        self.assertNotIn(SESSION_HEADER, overrides[ANTHROPIC_CUSTOM_HEADERS_ENV])
+
+    def test_empty_session_header_adds_no_env(self) -> None:
+        expectations = {
+            "claudecode": _candidate(1),
+            "codex": _candidate(2, protocol="openai_responses"),
+            "pi": _candidate(3, protocol="gemini"),
+        }
+        for worker_type, candidate in expectations.items():
+            with self.subTest(worker_type=worker_type):
+                overrides = worker_env_overrides(_worker(worker_type), candidate)
+                self.assertNotIn(LLM_SESSION_HEADER_ENV, overrides)
+
+    def test_static_duplicate_of_session_header_is_filtered(self) -> None:
+        candidate = _candidate(
+            1,
+            headers={"X-OpenCode-Session": "stale", "X-Keep": "yes"},
+            session_header=SESSION_HEADER,
+        )
+        overrides = worker_env_overrides(_worker("claudecode"), candidate)
+        self.assertEqual(overrides[ANTHROPIC_CUSTOM_HEADERS_ENV], "X-Keep: yes")
+        self.assertEqual(json.loads(overrides[LLM_HTTP_HEADERS_ENV]), {"X-Keep": "yes"})
+
+    def test_apply_pool_propagates_session_header_env(self) -> None:
+        base = _dispatch_config()
+        result = apply_pool(base, [_candidate(1, session_header=SESSION_HEADER)], {})
+        env = next(worker.env for worker in result.config.workers if worker.name == "cc")
+        self.assertEqual(env[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+        self.assertNotIn(LLM_SESSION_HEADER_ENV, base.workers[0].env)
+
+
+class AdapterSessionHeaderTests(unittest.TestCase):
+    """Contract section 3.2: value is computed per command, never stored."""
+
+    def _worker_with_session(
+        self,
+        worker_type: str,
+        name: str | None = None,
+        extra: dict[str, str] | None = None,
+    ) -> WorkerConfig:
+        env_extra = {LLM_SESSION_HEADER_ENV: SESSION_HEADER}
+        env_extra.update(extra or {})
+        return _worker(worker_type, name=name, env_extra=env_extra)
+
+    # -- claudecode ---------------------------------------------------------
+
+    def test_claudecode_healthcheck_uses_healthcheck_session_value(self) -> None:
+        worker = self._worker_with_session("claudecode", name="cc")
+        script = ClaudeCodeDriver().build_healthcheck(worker)[-1]
+        self.assertIn(f"{SESSION_HEADER}: healthcheck-cc", script)
+
+    def test_claudecode_execute_prepends_custom_headers_env(self) -> None:
+        worker = self._worker_with_session(
+            "claudecode",
+            name="cc",
+            extra={LLM_HTTP_HEADERS_ENV: json.dumps({"X-Debug": "secret"})},
+        )
+        argv = ClaudeCodeDriver().build_execute(worker, "hi", "session-abc").argv
+        self.assertEqual(argv[0], "env")
+        prefix = argv[1]
+        self.assertTrue(prefix.startswith(f"{ANTHROPIC_CUSTOM_HEADERS_ENV}="))
+        value = prefix.split("=", 1)[1]
+        self.assertIn("X-Debug: secret", value)
+        self.assertIn(f"{SESSION_HEADER}: session-abc", value)
+        self.assertEqual(argv[2], "claude")
+
+    def test_claudecode_conclude_uses_same_session_value(self) -> None:
+        worker = self._worker_with_session("claudecode", name="cc")
+        argv = ClaudeCodeDriver().build_conclude(worker, "hi", "session-abc")
+        self.assertEqual(argv[0], "env")
+        self.assertIn(f"{SESSION_HEADER}: session-abc", argv[1])
+
+    def test_claudecode_without_session_header_is_unchanged(self) -> None:
+        argv = ClaudeCodeDriver().build_execute(_worker("claudecode"), "hi", "session-abc").argv
+        self.assertEqual(argv[0], "claude")
+        self.assertFalse(any(SESSION_HEADER in part for part in argv))
+
+    def test_claudecode_describe_masks_session_header_value(self) -> None:
+        worker = self._worker_with_session("claudecode", name="cc")
+        description = ClaudeCodeDriver().describe_startup_healthcheck(worker)
+        self.assertIn(f"{SESSION_HEADER}: ***", description)
+        self.assertNotIn("healthcheck-cc", description)
+
+    # -- codex --------------------------------------------------------------
+
+    def test_codex_healthcheck_uses_healthcheck_session_value(self) -> None:
+        worker = self._worker_with_session("codex", name="cx")
+        script = CodexDriver().build_healthcheck(worker)[-1]
+        self.assertIn(f"{SESSION_HEADER}: healthcheck-cx", script)
+
+    @staticmethod
+    def _http_headers_argument(argv: list[str]) -> str:
+        for index, part in enumerate(argv):
+            if part == "-c" and "http_headers" in argv[index + 1]:
+                return argv[index + 1]
+        return ""
+
+    @staticmethod
+    def _session_value(argument: str) -> str:
+        prefix = f'"{SESSION_HEADER}" = "'
+        return argument.split(prefix, 1)[1].split('"', 1)[0]
+
+    def test_codex_execute_uses_worker_random_session_value(self) -> None:
+        worker = self._worker_with_session("codex", name="cx")
+        argument = self._http_headers_argument(CodexDriver().build_execute(worker, "hi", None).argv)
+        self.assertIn(f'"{SESSION_HEADER}" = "cx-', argument)
+
+    def test_codex_execute_random_value_changes_per_process(self) -> None:
+        worker = self._worker_with_session("codex", name="cx")
+        first = self._http_headers_argument(CodexDriver().build_execute(worker, "hi", None).argv)
+        second = self._http_headers_argument(CodexDriver().build_execute(worker, "hi", None).argv)
+        self.assertNotEqual(self._session_value(first), self._session_value(second))
+        self.assertTrue(self._session_value(first).startswith("cx-"))
+        self.assertEqual(len(self._session_value(first)), len("cx-") + 12)
+
+    def test_codex_conclude_uses_provided_session(self) -> None:
+        worker = self._worker_with_session("codex", name="cx")
+        argv = CodexDriver().build_conclude(worker, "hi", "session-abc")
+        self.assertIn(f'"{SESSION_HEADER}" = "session-abc"', self._http_headers_argument(argv))
+
+    def test_codex_without_session_header_has_no_dynamic_header(self) -> None:
+        argv = CodexDriver().build_execute(_worker("codex"), "hi", None).argv
+        self.assertFalse(any("http_headers" in part for part in argv))
+
+    def test_codex_describe_masks_session_header_value(self) -> None:
+        worker = self._worker_with_session("codex", name="cx")
+        description = CodexDriver().describe_startup_healthcheck(worker)
+        self.assertIn(f"{SESSION_HEADER}: ***", description)
+        self.assertNotIn("healthcheck-cx", description)
+
+    # -- pi -----------------------------------------------------------------
+
+    def test_pi_healthcheck_passes_healthcheck_session_value(self) -> None:
+        worker = self._worker_with_session("pi", name="pi")
+        argv = PiDriver().build_healthcheck(worker)
+        self.assertEqual(argv[5], "healthcheck-pi")
+        self.assertIn("CAIRN_LLM_SESSION_HEADER", argv[2])
+
+    def test_pi_execute_passes_session_value_as_argument(self) -> None:
+        worker = self._worker_with_session("pi", name="pi")
+        result = PiDriver().build_execute(worker, "hi", "pi-session-1")
+        self.assertEqual(result.argv[5], "pi-session-1")
+        self.assertIn("session_value", result.argv[2])
+        self.assertIn("session_name", result.argv[2])
+
+    def test_pi_execute_generates_random_value_without_session(self) -> None:
+        worker = self._worker_with_session("pi", name="pi")
+        result = PiDriver().build_execute(worker, "hi", None)
+        self.assertTrue(result.argv[5].startswith("pi-"))
+        self.assertEqual(len(result.argv[5]), len("pi-") + 12)
+
+    def test_pi_conclude_passes_session_value(self) -> None:
+        worker = self._worker_with_session("pi", name="pi")
+        argv = PiDriver().build_conclude(worker, "hi", "pi-session-1")
+        self.assertEqual(argv[5], "pi-session-1")
+
+    def test_pi_without_session_header_keeps_script_but_no_dynamic_header(self) -> None:
+        result = PiDriver().build_execute(_worker("pi"), "hi", None)
+        # The embedded python only injects the header when CAIRN_LLM_SESSION_HEADER is set.
+        self.assertIn("CAIRN_LLM_SESSION_HEADER", result.argv[2])
+        self.assertFalse(any(SESSION_HEADER in part for part in result.argv[1:]))
+
+
+class LoopSessionHeaderTests(_LoopTestCase):
+    def test_refresh_applies_session_header_env_to_workers(self) -> None:
+        self.loop.client.get_llm_configs.return_value = [
+            _payload(1, session_header=SESSION_HEADER),
+            _payload(2, protocol="openai_responses", session_header=SESSION_HEADER),
+        ]
+        self.loop._refresh_llm_config()
+        self.assertEqual(self._worker_env("cc")[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+        self.assertEqual(self._worker_env("cx")[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+        self.assertEqual(self._worker_env("pi")[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+        static = self._worker_env("cc").get(LLM_HTTP_HEADERS_ENV, "{}")
+        self.assertNotIn(SESSION_HEADER, json.loads(static))
+
+    def test_rotation_switches_session_header_with_candidate(self) -> None:
+        self.loop.client.get_llm_configs.return_value = [
+            _payload(1, session_header="x-first"),
+            _payload(2, session_header="x-second"),
+        ]
+        self.loop._refresh_llm_config()
+        self.assertEqual(self._worker_env("cc")[LLM_SESSION_HEADER_ENV], "x-first")
+        self._finish("unhealthy", worker_name="cc", llm_config_id=1)
+        self.assertEqual(self.loop._worker_active_config["cc"], 2)
+        self.assertEqual(self._worker_env("cc")[LLM_SESSION_HEADER_ENV], "x-second")
+
+    def test_session_header_change_alone_rebuilds_config(self) -> None:
+        self.loop.client.get_llm_configs.return_value = [_payload(1)]
+        self.loop._refresh_llm_config()
+        self.assertNotIn(LLM_SESSION_HEADER_ENV, self._worker_env("cc"))
+        self.loop.client.get_llm_configs.return_value = [_payload(1, session_header=SESSION_HEADER)]
+        self.loop._refresh_llm_config()
+        self.assertEqual(self._worker_env("cc")[LLM_SESSION_HEADER_ENV], SESSION_HEADER)
+
+    def test_startup_healthcheck_round_sees_session_header_env(self) -> None:
+        self.loop.client.get_llm_configs.return_value = [_payload(1, session_header=SESSION_HEADER)]
+        self.loop._refresh_llm_config()
+        seen: list[dict[str, str]] = []
+
+        def fake(config, container_manager, *, show_commands=False, workers=None):
+            seen.append(next(worker.env for worker in config.workers if worker.name == "cc"))
+            return [_startup_result(worker.name, ok=True) for worker in workers]
+
+        self._patch_healthchecks(fake)
+        self.loop._run_startup_healthchecks(show_commands=False)
+        self.assertEqual(seen[0][LLM_SESSION_HEADER_ENV], SESSION_HEADER)

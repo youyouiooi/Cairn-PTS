@@ -5,7 +5,8 @@ import shlex
 from dataclasses import dataclass
 from typing import Mapping
 
-from cairn.dispatcher.llm_override import LLM_HTTP_HEADERS_ENV
+from cairn.dispatcher.config import WorkerConfig
+from cairn.dispatcher.llm_override import LLM_HTTP_HEADERS_ENV, LLM_SESSION_HEADER_ENV
 
 
 _VERBOSE_CURL_SCRIPT = """
@@ -92,6 +93,31 @@ def filter_custom_headers(
         for name, value in headers.items()
         if name.lower() not in builtin_names
     }
+
+
+def session_header_name(worker: WorkerConfig) -> str:
+    """Header name whose value must be the current session id, or ``""``."""
+    return worker.env.get(LLM_SESSION_HEADER_ENV, "").strip()
+
+
+def with_session_header(
+    headers: Mapping[str, str],
+    name: str,
+    value: str,
+) -> dict[str, str]:
+    """Return a copy of ``headers`` with ``name: value`` merged case-insensitively.
+
+    An existing key that differs only in case is removed before the dynamic
+    header is appended; when either the name or the value is empty nothing is
+    injected, so ``session_header=""`` keeps the previous behaviour exactly.
+    """
+    merged = dict(headers)
+    if not name or not value:
+        return merged
+    lowered = name.lower()
+    merged = {key: header_value for key, header_value in merged.items() if key.lower() != lowered}
+    merged[name] = value
+    return merged
 
 
 @dataclass(frozen=True, slots=True)

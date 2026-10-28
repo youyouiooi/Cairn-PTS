@@ -24,7 +24,7 @@ Read `docs/DESIGN.md` for the full design and scheduler walkthrough.
 | Dispatcher | Open HTTP to the server | `Authorization: Bearer` |
 | Listen address | Compose published `0.0.0.0:8000` | `127.0.0.1:8000` |
 | Healthcheck | API keys in `argv` | Keys stay in the process environment |
-| LLM config | single config, env in `dispatch.yaml` | ordered pool in the UI, multi-protocol, custom headers, automatic failover |
+| LLM config | single config, env in `dispatch.yaml` | ordered pool in the UI, multi-protocol, custom headers, per-session header values, automatic failover |
 | Vulnerability data | free-form `fact.description` only | first-class `findings` table, REST API, project dashboard, Markdown export |
 
 The search algorithm is unchanged: bootstrap → explore → reason, stigmergy through the graph, one Dispatcher.
@@ -108,6 +108,12 @@ single config env override in `dispatch.yaml`:
 - custom headers (for example `X-Tenant` or `x-api-key`) are sent by the
   connection test and by the worker adapters, so gateway/tenant headers work
   without touching YAML
+- an optional **session header name** (for example `x-opencode-session`) for
+  gateways that route or cache by session id: the configuration only stores the
+  header *name*, and the dispatcher fills the value with the current session id
+  on every request (the agent session UUID for `claudecode`; a per-process id for
+  `codex`/`pi`; a `healthcheck-<worker>` id for health checks). Values never reach
+  the database, the logs or the browser UI.
 - when a worker health check fails, the dispatcher cools that configuration down
   (30s → 60s → … → 300s) and rotates the worker to the next compatible
   configuration; if every configuration is cooling down it retries the one that

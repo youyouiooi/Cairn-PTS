@@ -34,6 +34,9 @@ CONFIG_FAILURE_COOLDOWN_MAX_SECONDS = 300
 # Custom header env var shared by every adapter. The value is a JSON object and
 # may contain secrets; adapters must never log it verbatim.
 LLM_HTTP_HEADERS_ENV = "CAIRN_LLM_HTTP_HEADERS"
+# Name of the per-session header (e.g. ``x-opencode-session``). Only the header
+# name travels in the env; adapters fill its value with the current session id.
+LLM_SESSION_HEADER_ENV = "CAIRN_LLM_SESSION_HEADER"
 # claudecode reads its extra headers from this env var directly.
 ANTHROPIC_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 
@@ -50,6 +53,7 @@ class LlmCandidate:
     small_fast_model: str
     api_key: str
     headers: dict[str, str]
+    session_header: str = ""
 
 
 @dataclass
@@ -94,6 +98,7 @@ def parse_pool(payload: Sequence[LlmConfigPayload]) -> list[LlmCandidate]:
                 small_fast_model=entry.small_fast_model,
                 api_key=entry.api_key,
                 headers=dict(entry.headers),
+                session_header=entry.session_header,
             )
         )
     return candidates
@@ -110,6 +115,7 @@ def pool_fingerprint(pool: Sequence[LlmCandidate]) -> tuple:
             candidate.small_fast_model,
             candidate.api_key,
             tuple(sorted(candidate.headers.items())),
+            candidate.session_header,
         )
         for candidate in pool
     )
@@ -181,10 +187,19 @@ def next_candidate_after_failure(
 
 
 def worker_env_overrides(worker: WorkerConfig, candidate: LlmCandidate) -> dict[str, str] | None:
-    """Env keys the candidate replaces for this worker, or None when unsupported."""
+    """Env keys the candidate replaces for this worker, or None when unsupported.
+
+    The dynamic session header travels as a bare header *name* in
+    ``CAIRN_LLM_SESSION_HEADER``; adapters compute its value per request. It is
+    never written into the static ``CAIRN_LLM_HTTP_HEADERS`` JSON. A stale static
+    header with the same (case-insensitive) name is filtered from the static
+    headers so it cannot shadow the dynamic value.
+    """
     if not protocol_supported(worker.type, candidate.protocol):
         return None
-    headers_env = _headers_env(candidate)
+    static_headers = _static_headers(candidate)
+    headers_env = _headers_env(static_headers)
+    session_overrides = _session_header_override(candidate)
 
     if worker.type == "claudecode":
         overrides = {
@@ -196,9 +211,10 @@ def worker_env_overrides(worker: WorkerConfig, candidate: LlmCandidate) -> dict[
             overrides["ANTHROPIC_SMALL_FAST_MODEL"] = candidate.small_fast_model
         if headers_env is not None:
             overrides[ANTHROPIC_CUSTOM_HEADERS_ENV] = "\n".join(
-                f"{name}: {value}" for name, value in candidate.headers.items()
+                f"{name}: {value}" for name, value in static_headers.items()
             )
             overrides[LLM_HTTP_HEADERS_ENV] = headers_env
+        overrides.update(session_overrides)
         return overrides
 
     if worker.type == "codex":
@@ -209,6 +225,7 @@ def worker_env_overrides(worker: WorkerConfig, candidate: LlmCandidate) -> dict[
         }
         if headers_env is not None:
             overrides[LLM_HTTP_HEADERS_ENV] = headers_env
+        overrides.update(session_overrides)
         return overrides
 
     if worker.type == "pi":
@@ -220,6 +237,7 @@ def worker_env_overrides(worker: WorkerConfig, candidate: LlmCandidate) -> dict[
         }
         if headers_env is not None:
             overrides[LLM_HTTP_HEADERS_ENV] = headers_env
+        overrides.update(session_overrides)
         return overrides
 
     return None
@@ -267,10 +285,28 @@ def apply_pool(
     )
 
 
-def _headers_env(candidate: LlmCandidate) -> str | None:
-    if not candidate.headers:
+def _static_headers(candidate: LlmCandidate) -> dict[str, str]:
+    """Candidate headers minus any stale duplicate of the dynamic session header."""
+    session_name = candidate.session_header.lower()
+    if not session_name:
+        return dict(candidate.headers)
+    return {
+        name: value
+        for name, value in candidate.headers.items()
+        if name.lower() != session_name
+    }
+
+
+def _headers_env(headers: dict[str, str]) -> str | None:
+    if not headers:
         return None
-    return json.dumps(candidate.headers, ensure_ascii=False)
+    return json.dumps(headers, ensure_ascii=False)
+
+
+def _session_header_override(candidate: LlmCandidate) -> dict[str, str]:
+    if not candidate.session_header:
+        return {}
+    return {LLM_SESSION_HEADER_ENV: candidate.session_header}
 
 
 def _is_cooling(cooldown_until: Mapping[int, float], config_id: int, now: float) -> bool:
