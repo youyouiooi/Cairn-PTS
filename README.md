@@ -8,6 +8,11 @@
 - a first-class **findings** (vulnerability) entity: table, REST API, project dashboard, Markdown export
 - a Windows / Docker Desktop deployment path (Kali `linux/amd64` worker container)
 
+**Current version: [`0.3.0`](CHANGELOG.md)** — initial public release of the fork; upstream baseline [Cairn](https://github.com/oritera/Cairn) `0.2.1`. The full list of changes against the original is in [`CHANGELOG.md`](CHANGELOG.md).
+
+> [!WARNING]
+> **For learning, security research and authorized lab testing only — do not use it against real networks.** Cairn-PTS runs autonomous offensive tooling. Do not use it against production systems, the public Internet, or any target you do not own or have explicit written authorization to test. See [Disclaimer](#disclaimer).
+
 Read `docs/DESIGN.md` for the full design and scheduler walkthrough.
 
 ## What changed from upstream 0.2.1
@@ -185,7 +190,48 @@ only — do not set `platform: linux/arm64` on it.
 
 ## Disclaimer
 
-Same as upstream: only use this against systems you are authorized to test. Local executor runs agent CLIs with your user privileges.
+> [!CAUTION]
+> **For learning, security research and authorized testing only. DO NOT use Cairn-PTS against real networks, production systems, Internet-facing services, or any target you do not own or have explicit written authorization to test.** Unauthorized scanning, penetration testing or exploitation may be a criminal offence.
+
+Cairn-PTS is an AI-driven autonomous penetration-testing **research** project. It is
+distributed for study, experimentation and authorized security testing in isolated
+lab environments only. It is not a commercial product: no warranty, no support and
+no fitness for any particular purpose are provided.
+
+Rules of use:
+
+- **Authorization first.** Only run it against systems you own or for which you hold
+  explicit written authorization from the owner (a signed engagement / rules of
+  engagement, an in-scope bug-bounty or SRC program, or a CTF environment). "It was
+  on the Internet" is never authorization.
+- **Do not target the real Internet.** Do not point it at public IPs, third-party
+  infrastructure, cloud accounts, customer environments or production networks. The
+  worker image ships offensive tooling and an autonomous agent that may run
+  destructive commands, exfiltrate data, or open outbound callbacks.
+- **Isolate it.** The local executor runs worker CLIs (`claude`, `codex`, `pi`) with
+  your user privileges and can read/write files reachable by your account, spawn
+  outbound traffic and OOB callbacks (reverse shells, DNS/HTTP callbacks). Keep it in
+  a dedicated VM or isolated network, never on a machine with valuable credentials.
+- **Comply with the law.** You are solely responsible for compliance with applicable
+  laws and regulations — for example the PRC Cybersecurity Law, Criminal Law
+  articles 285/286 and Data Security Law, and equivalent laws in your jurisdiction —
+  as well as the terms of service of any platform, model provider or scope provider.
+- **Untrusted output.** Findings, model output and generated prompts are
+  automation output, not verified facts. Verify anything manually before relying on
+  it or reporting it. The maintainers are not responsible for damage, data loss,
+  service disruption or legal consequences caused by use or misuse.
+- **Protect secrets.** Never commit real API keys, tokens, credentials or customer
+  data. Model-provider terms apply to your own accounts and keys.
+- **No liability.** To the maximum extent permitted by law, the maintainers and
+  contributors accept no liability for any direct, indirect, incidental or
+  consequential loss arising from use of this software. It is provided "AS IS",
+  without warranty of any kind.
+- **Report software security issues privately** (do not open a public issue with
+  exploit details).
+
+### 中文免责声明
+
+本项目仅供学习、安全研究以及在**获得明确书面授权**的隔离实验环境内使用。**严禁**将本项目用于真实网络、生产系统、公网资产，或任何未经授权的目标；未经授权对他人系统进行扫描、渗透或利用可能构成违法犯罪，使用者须自行承担全部法律责任。使用者应自行遵守所在地法律法规（如《中华人民共和国网络安全法》《刑法》第二百八十五条、第二百八十六条、《数据安全法》等）及相关平台规则。本项目按“现状”提供，不提供任何明示或暗示的担保；维护者不对因使用或滥用本项目造成的任何直接或间接损失负责。请勿在包含敏感凭据或生产数据的主机上运行本项目。
 
 ## License
 
