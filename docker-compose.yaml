@@ -1,0 +1,50 @@
+# Compose interpolates CAIRN_* from a sibling `.env` (copy `.env.example`).
+# Do not put passwords in this file.
+# Windows / Docker Desktop (linux/amd64) deployment.
+services:
+  cairn-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cairn-app
+    container_name: cairn-server
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      CAIRN_AUTH_USERNAME: ${CAIRN_AUTH_USERNAME:-admin}
+      CAIRN_AUTH_PASSWORD: ${CAIRN_AUTH_PASSWORD:-admin}
+      CAIRN_API_TOKEN: ${CAIRN_API_TOKEN:-cairn_dev_token_change_me}
+    volumes:
+      - ./datas/cairn/:/root/.local/share/cairn/
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 3s
+    restart: "no"
+    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+  cairn-dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cairn-app
+    container_name: cairn-dispatcher
+    environment:
+      CAIRN_API_TOKEN: ${CAIRN_API_TOKEN:-cairn_dev_token_change_me}
+      CAIRN_SERVER: ${CAIRN_SERVER:-http://cairn-server:8000}
+      CAIRN_WORKER_IMAGE: ${CAIRN_WORKER_IMAGE:-ghcr.io/oritera/cairn-worker-container:latest}
+      CAIRN_WORKER_PLATFORM: ${CAIRN_WORKER_PLATFORM:-linux/amd64}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./dispatch.yaml:/cairn/dispatch.yaml
+    depends_on:
+      cairn-server:
+        condition: service_healthy
+    restart: "no"
+    command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]

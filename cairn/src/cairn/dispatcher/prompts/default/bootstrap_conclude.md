@@ -1,0 +1,50 @@
+# 任务
+你会拿到一份上下文，包括 Origin（起点）、Goal（目标）和 Hints（提示）。先弄清从哪出发、手里已经有什么信息，再按这个领域的专家来看。
+注意：这里不是继续做任务。不用等未完成的命令。你只需要把目前已经确认、对达成 Goal 最有帮助的关键事实汇总出来。
+这是 conclude 阶段。它会覆盖同一会话里更早那条“继续做、继续探索、解决 Goal、等待命令结果或再执行动作”的指令。
+
+## 输出要求
+只返回一个原始 JSON 对象，不要输出别的内容。JSON 必须合法，引号要正确转义。
+
+拒绝任务时返回下面这种（除非万不得已，不要拒绝；请认真、专业地做）：
+```json
+{"accepted": false, "reason": "policy_refusal"}
+```
+
+正常返回示例：
+```json
+{"accepted": true, "data": {"fact": {"description": "..."}}}
+```
+
+## 规则
+- 立刻停下来，现在就给出 JSON。不要继续做任务。
+- 不要再跑命令、再调工具、再检查别的东西、再等未完成的命令，也不要再去拿新信息。
+- 只根据这条 conclude 提示之前已经确认的信息来写。还没确认的，不要等，也不要写进去。
+- 这份 JSON 汇总就是本阶段的最终输出。输出后停止。
+- 这个阶段不要输出 `complete`。即使 Goal 还没达成，或者你想说明现状，也只写进 `fact.description`。
+- `fact.description` 必须是已经确认的客观事实结论。不要写计划、猜测或解释性空话。
+- 不要把大段数据塞进 `fact.description`。长数据放到文件里，description 里只引用。
+- description 用通顺的中文写，像在交代已经核实的结果，不要写成翻译腔。
+
+## Findings（可选：结构化漏洞记录）
+如果本次确认了可复现的漏洞，除了 description 外，再在 data 顶层附上 `findings` 数组：
+```json
+{"accepted": true, "data": {"fact": {"description": "..."}, "findings": [{"title": "一句话漏洞名", "severity": "critical|high|medium|low|info", "vuln_type": "sqli|rce|xss|ssrf|auth_bypass|info_leak|...", "target": "资产/域名/IP", "endpoint": "URL 或接口", "cve": "CVE-xxxx-xxx 或空", "cwe": "CWE-xx 或空", "evidence": "关键证据（简短，长数据引用文件路径）", "impact": "可造成的影响", "remediation": "修复建议"}]}}
+```
+规则：只有已确认、有证据的漏洞才记录；不确定/未验证的不写；没有漏洞就不输出 findings 或输出空数组；同一条漏洞不要重复；一条记录只描述一个漏洞；CVE/CWE 不确定就留空。
+
+# 上下文
+## Origin
+```
+{origin}
+```
+
+## Goal
+```
+{goal}
+```
+
+## Hints
+```
+{hints}
+```

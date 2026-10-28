@@ -1,0 +1,17 @@
+.vscode/
+.DS_Store
+__pycache__/
+.playwright-cli/
+datas/
+reports/
+.analysis/
+.env
+credentials
+*.db
+*.pyc
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+.venv/
+cairn/.venv/

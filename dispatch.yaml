@@ -1,0 +1,51 @@
+# Windows / Docker Desktop (linux/amd64) deployment.
+# Dispatcher runs in a container; CAIRN_SERVER env overrides this value.
+server: "http://127.0.0.1:8000"
+
+# Leave empty to use CAIRN_API_TOKEN or ~/.local/share/cairn/credentials.
+api_token: ""
+
+common_env: {}
+
+runtime:
+  executor: auto
+  interval: 3
+  max_workers: 4
+  max_running_projects: 2
+  max_project_workers: 2
+  healthcheck_timeout: 20
+  prompt_group: "default"
+
+tasks:
+  bootstrap:
+    timeout: 300
+    conclude_timeout: 90
+  reason:
+    timeout: 300
+    max_intents: 2
+  explore:
+    timeout: 300
+    conclude_timeout: 90
+
+container:
+  # Used only when runtime.executor resolves to docker (Linux host => docker).
+  # Prebuilt upstream Kali worker image, linux/amd64 only.
+  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  platform: "linux/amd64"
+  network_mode: "bridge"
+  completed_action: "stop"
+
+workers:
+  - name: "claudecode_deepseek-chat"
+    type: "claudecode"
+    task_types: [bootstrap, reason, explore]
+    max_running: 16
+    priority: 0
+    env:
+      ANTHROPIC_MODEL: "deepseek-chat"
+      # DeepSeek official Anthropic-compatible endpoint.
+      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+      # claude code background/haiku model must also map to deepseek-chat.
+      ANTHROPIC_SMALL_FAST_MODEL: "deepseek-chat"
+      # Put the real key in .env as ANTHROPIC_AUTH_TOKEN. Do not commit it here.
+      ANTHROPIC_AUTH_TOKEN: ""
